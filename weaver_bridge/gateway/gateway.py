@@ -279,7 +279,7 @@ def build_server(downstreams: dict[str, Downstream], control: Control) -> Server
     status_tool = types.Tool(
         name="bridge_status",
         description="Show which programs on the user's PC (Cinema 4D, Houdini, Fusion, Nuke, Weaver ...) "
-        "are connected to the Weaver Bridge, how many tools each has, and the guard mode "
+        "are open (program OPEN/closed) and connected (adapter ok, tools), and the guard mode "
         "(restart after a crash, keep programs open).",
         inputSchema={"type": "object", "properties": {}},
     )
@@ -317,11 +317,25 @@ def build_server(downstreams: dict[str, Downstream], control: Control) -> Server
     async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         arguments = arguments or {}
         if name == "bridge_status":
+            # "ok" of a downstream only means its MCP adapter runs; whether the program itself is open
+            # comes from the supervisor (status.json next to control.json)
+            apps = {}
+            if control.path:
+                try:
+                    apps = json.loads((control.path.parent / "status.json").read_text(encoding="utf-8-sig"))["apps"]
+                except Exception:  # noqa: BLE001
+                    apps = {}
             lines = []
             for ds_name, ds in downstreams.items():
                 tools = await ds.list_tools() if ds.session else ds._cached
-                lines.append(f"{ds_name}: {ds.state()}, {len(tools)} tools" if ds.session
-                             else f"{ds_name}: {ds.state()} ({len(tools)} tools cached)")
+                line = (f"{ds_name}: adapter {ds.state()}, {len(tools)} tools" if ds.session
+                        else f"{ds_name}: adapter {ds.state()} ({len(tools)} tools cached)")
+                app = apps.get(ds_name)
+                if app:
+                    opened = bool(app.get("pids"))
+                    mcp = {True: "MCP port open", False: "MCP port closed"}.get(app.get("port"), "")
+                    line += " | program %s%s" % ("OPEN" if opened else "closed", (", " + mcp) if opened and mcp else "")
+                lines.append(line)
             lines.append("")
             lines.append(control.summary())
             return _text("\n".join(lines))
