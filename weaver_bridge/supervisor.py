@@ -346,6 +346,7 @@ class Tunnel(Child):
         self.read_pos = 0
         self.fallback = None         # why ngrok was given up (then cloudflared runs)
         self.quick_exits = 0
+        self.first_fail = None
 
     def kind(self):
         k = (CFG.get("tunnel") or {}).get("type", "cloudflare")
@@ -355,8 +356,14 @@ class Tunnel(Child):
         if self.kind() == "none":      # the user runs an own tunnel: nothing to start
             return
         if self.kind() == "ngrok" and self.proc is not None and self.proc.poll() is not None:
-            self.quick_exits = self.quick_exits + 1 if time.time() - self.started < 60 else 0
-            if self.quick_exits >= 3:
+            now = time.time()
+            if now - self.started < 60:
+                self.quick_exits += 1
+                self.first_fail = self.first_fail or now
+            else:
+                self.quick_exits, self.first_fail = 0, None
+            # after a restart the old ngrok session may hold the domain for a while: give it 3 minutes
+            if self.quick_exits >= 4 and now - self.first_fail > 180:
                 self.give_up_ngrok(self.ngrok_error() or "ngrok сразу закрывается")
         super().ensure(want)
 
