@@ -49,7 +49,7 @@ except ImportError:  # the venv from install.py has it; plain python may not
 IS_WIN = os.name == "nt"
 NO_WINDOW = 0x08000000 if IS_WIN else 0
 DETACHED = (0x00000008 | 0x00000200 | 0x01000000) if IS_WIN else 0  # DETACHED | NEW_GROUP | BREAKAWAY
-VERSION = 2
+VERSION = 3
 LOCK_PORT = 47290
 LOOP_S = 5
 APPS_EVERY_S = 10
@@ -283,15 +283,42 @@ def gateway_health():
         return False
 
 
-def tunnel_cmd():
+def find_ngrok(configured=None):
+    """ngrok.exe: the configured path, PATH, or where winget / choco / scoop put it
+    (a supervisor started before the install does not see the new PATH)."""
+    import shutil
+    if configured and os.path.isfile(configured):
+        return configured
+    hit = shutil.which(configured or "ngrok") or shutil.which("ngrok")
+    if hit:
+        return hit
+    la = os.environ.get("LOCALAPPDATA", "")
+    pats = [os.path.join(la, "Microsoft", "WinGet", "Links", "ngrok.exe"),
+            os.path.join(la, "Microsoft", "WinGet", "Packages", "Ngrok.Ngrok*", "ngrok.exe"),
+            os.path.join(la, "ngrok", "ngrok.exe"),
+            r"C:\ProgramData\chocolatey\bin\ngrok.exe",
+            os.path.join(os.path.expanduser("~"), "scoop", "shims", "ngrok.exe"),
+            os.path.join(os.path.expanduser("~"), "Downloads", "ngrok*", "ngrok.exe"),
+            os.path.join(os.path.expanduser("~"), "Downloads", "ngrok.exe"),
+            common.home_path(CFG, "bin", "ngrok.exe")]
+    for pat in pats:
+        found = glob.glob(pat)
+        if found:
+            return found[0]
+    return None
+
+
+def tunnel_cmd(kind):
     t = CFG.get("tunnel") or {}
-    kind = t.get("type", "cloudflare")
     port = str(CFG["gateway_port"])
     if kind == "ngrok":
         if not t.get("ngrok_domain"):
             log("tunnel: tunnel.ngrok_domain is empty in config.json")
             return None
-        return [t.get("ngrok_path") or "ngrok", "http", "--url=" + t["ngrok_domain"], port, "--log=stdout"]
+        exe = find_ngrok(t.get("ngrok_path"))
+        if not exe:
+            return None
+        return [exe, "http", "--url=" + t["ngrok_domain"], port, "--log=stdout"]
     if kind == "cloudflare":
         cf = common.home_path(CFG, "bin", "cloudflared.exe")
         if not os.path.isfile(cf):
@@ -310,33 +337,68 @@ def watcher_cmd():
 
 
 class Tunnel(Child):
+    """cloudflared or ngrok. If ngrok cannot run (not installed, no authtoken, the domain busy), the bridge
+    falls back to a cloudflared quick tunnel for this session and says why - claude.ai keeps working."""
+
     def __init__(self):
-        super().__init__("tunnel", tunnel_cmd)
+        super().__init__("tunnel", lambda: tunnel_cmd(self.kind()))
         self.base = None
         self.read_pos = 0
+        self.fallback = None         # why ngrok was given up (then cloudflared runs)
+        self.quick_exits = 0
 
     def kind(self):
-        return (CFG.get("tunnel") or {}).get("type", "cloudflare")
+        k = (CFG.get("tunnel") or {}).get("type", "cloudflare")
+        return "cloudflare" if (k == "ngrok" and self.fallback) else k
 
     def ensure(self, want=True):
         if self.kind() == "none":      # the user runs an own tunnel: nothing to start
             return
+        if self.kind() == "ngrok" and self.proc is not None and self.proc.poll() is not None:
+            self.quick_exits = self.quick_exits + 1 if time.time() - self.started < 60 else 0
+            if self.quick_exits >= 3:
+                self.give_up_ngrok(self.ngrok_error() or "ngrok сразу закрывается")
         super().ensure(want)
+
+    def ngrok_error(self):
+        try:
+            with open(self.log_path, encoding="utf-8", errors="ignore") as f:
+                f.seek(self.read_pos)
+                text = f.read()
+        except OSError:
+            return None
+        m = re.search(r"(ERR_NGROK_\d+)", text)
+        hints = {"ERR_NGROK_4018": "нет authtoken: ngrok config add-authtoken <токен с dashboard.ngrok.com>",
+                 "ERR_NGROK_334": "домен уже занят другим ngrok (закрой лишний ngrok)",
+                 "ERR_NGROK_108": "ngrok уже запущен в другом месте (закрой лишний ngrok)"}
+        return (m.group(1) + (" — " + hints[m.group(1)] if m.group(1) in hints else "")) if m else None
+
+    def give_up_ngrok(self, why):
+        if self.fallback:
+            return
+        self.fallback = why
+        self.fails, self.next_try, self.base = 0, 0.0, None
+        event("tunnel_fallback", "⚠️ ngrok не работает: %s.\nВременно включила запасной туннель cloudflare — "
+              "адрес будет другой (пришлю). Когда ngrok починишь: ♻️ Перезапустить мост." % why)
 
     def start(self):
         if self.cmd_fn() is None:
+            if self.kind() == "ngrok":
+                self.give_up_ngrok("ngrok.exe не найден (поставь: winget install ngrok.ngrok)")
+                return False
             self.next_try = time.time() + 60
             return False
-        self.base = None
+        if self.kind() == "cloudflare":
+            self.base = None           # a quick tunnel gets a new address every start
         ok = super().start()
         self.read_pos = os.path.getsize(self.log_path) if os.path.exists(self.log_path) else 0
         return ok
 
     def poll_url(self):
         t = CFG.get("tunnel") or {}
-        kind = t.get("type", "cloudflare")
+        kind = self.kind()
         base = None
-        if kind == "ngrok" and t.get("ngrok_domain"):
+        if kind == "ngrok" and t.get("ngrok_domain") and self.running() and time.time() - self.started > 8:
             base = "https://" + t["ngrok_domain"]
         elif kind == "none" and t.get("public_url"):
             base = t["public_url"].rstrip("/")
@@ -359,9 +421,8 @@ class Tunnel(Child):
             except OSError:
                 pass
             changed = kind == "cloudflare"
-            event("url", "🔗 Адрес коннектора %s. Получить: /url в боте или connector-url.txt в %s"
-                  % ("ИЗМЕНИЛСЯ — обнови коннектор в claude.ai" if changed else "готов", HOME),
-                  changed=changed)
+            event("url", "🔗 Адрес коннектора %s. Сам адрес — кнопка 🔗 Адрес в боте (целиком, с /mcp на конце)"
+                  % ("ИЗМЕНИЛСЯ — обнови коннектор в claude.ai" if changed else "готов"), changed=changed)
 
 
 # ------------------------------------------------------------------ programs
@@ -810,6 +871,7 @@ class Supervisor:
             "time": time.time(), "pid": os.getpid(), "version": VERSION, "mode": ctl["mode"], "bridge": ctl.get("bridge", True),
             "windows_autostart": bool(ctl.get("windows_autostart", True)),
             "gateway": "up" if self.gateway.running() and gateway_health() else "down",
+            "tunnel_kind": self.tunnel.kind(), "tunnel_note": self.tunnel.fallback,
             "tunnel": "external" if self.tunnel.kind() == "none" else
                       (("up" if self.tunnel.base else "starting") if self.tunnel.running() else "down"),
             "watcher": "up" if self.watcher.running() else "off",
