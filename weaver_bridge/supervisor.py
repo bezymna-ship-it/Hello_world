@@ -9,9 +9,10 @@ What it keeps alive:
   * gateway   - the MCP gateway (gateway/gateway.py), restarted in place if it dies or stops answering;
   * tunnel    - cloudflared (quick tunnel) or ngrok, so claude.ai can reach the gateway;
   * watcher   - the Telegram bot (watcher/weaver_watcher.py), if secrets.json has a bot token;
-  * programs  - Cinema 4D (two installs), Houdini, Nuke, Fusion, by the mode in control.json:
+  * programs  - Cinema 4D (two installs), Houdini, Nuke, Fusion, by the guard mode in control.json:
         off    nothing is started or killed;
-        crash  a program is started again only after it CRASHED (a normal close is left alone);
+        on     a program is started again only after it CRASHED (a normal close is left alone);
+               crash / error dialogs of our programs are closed;
         keep   watched programs are kept open: started if closed, restarted after a crash or a hang.
     After a crash the program re-opens the scene it had open (hooks/ inside each program do that).
 
@@ -511,7 +512,7 @@ class App:
                 self.pending = {"why": "после падения", "reopen": doc, "at": time.time() + 10}
         else:
             event("closed_unknown", "❔ %s закрылась, падение не подтверждено — сама не запускаю.\n"
-                  "Запустить: /run %s%s" % (self.label, self.key, ("\n📄 сцена: %s" % doc) if doc else ""),
+                  "Запустить: кнопка ниже или 🚀 Запустить%s" % (self.label, ("\n📄 сцена: %s" % doc) if doc else ""),
                   app=self.key, doc=doc)
             if not still_running:
                 self.parked = True

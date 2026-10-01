@@ -195,7 +195,7 @@ class Downstream:
         session = await self.get_session()
         if session is None:
             return _error(f"{self.label} is not connected right now ({self.last_error}). "
-                          "If the watchdog is on it starts the program by itself: check bridge_status "
+                          "If guard is on/keep it starts the program by itself: check bridge_status "
                           "in a minute and retry.")
         try:
             with anyio.fail_after(self.timeout):
@@ -279,8 +279,8 @@ def build_server(downstreams: dict[str, Downstream], control: Control) -> Server
     status_tool = types.Tool(
         name="bridge_status",
         description="Show which programs on the user's PC (Cinema 4D, Houdini, Fusion, Nuke, Weaver ...) "
-        "are connected to the Weaver Bridge, how many tools each has, and whether the watchdog "
-        "guard (restart after a crash, keep open) is on.",
+        "are connected to the Weaver Bridge, how many tools each has, and the guard mode "
+        "(restart after a crash, keep programs open).",
         inputSchema={"type": "object", "properties": {}},
     )
     control_tool = types.Tool(
