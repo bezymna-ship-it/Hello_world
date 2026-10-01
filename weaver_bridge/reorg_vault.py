@@ -1,9 +1,9 @@
 """Weaver: tidy the vault into 4 visible folders (2026-10-01). Nothing is deleted - old things go to _archive/.
 
-Close Obsidian, then in cmd:
-    cd /d G:\\todoist_obsidian_claude
+Runs by itself as a bridge job (jobs/), or by hand from the vault root:
     py Studio_bridge\\weaver_bridge\\reorg_vault.py          dry run: prints the plan, changes nothing
-    py Studio_bridge\\weaver_bridge\\reorg_vault.py --go     do it (and restart the bridge with the new code)
+    py Studio_bridge\\weaver_bridge\\reorg_vault.py --go     do it
+Obsidian may stay open; only the "Excluded files" setting waits until it is closed (a separate job).
 
 Visible in Obsidian afterwards:
     Projects/        tasks
@@ -25,7 +25,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VAULT = os.path.dirname(os.path.dirname(HERE))
+VAULT = os.environ.get("WEAVER_VAULT") or os.path.dirname(os.path.dirname(HERE))
 NEXT = "Studio_bridge/weaver_bridge/vault_next"
 DAY = "2026-10-01"
 ARCH = "_archive/" + DAY
@@ -93,12 +93,12 @@ REPLACE = [
 WORDS = [(re.compile(r"\bСторож(а|ем|у|е)?\b"), "Guard"), (re.compile(r"\bсторож(а|ем|у|е)?\b"), "guard")]
 REPLACE_IN = ["weaver_claude", "Weaver", "Studio_bridge/weaver_bridge", "Library/Library.md", "CLAUDE.md", "AGENTS.md"]
 REPLACE_EXT = (".md", ".py", ".txt")
-SKIP_DIRS = {"__pycache__", ".venv", "vault_next", "cmd_claude", "apps"}
+SKIP_DIRS = {"__pycache__", ".venv", "vault_next", "cmd_claude", "apps", "jobs"}
 SKIP_FILES = {"reorg_vault.py", "render_watchdog_base.py", "_sources.md"}
 IGNORE_ADD = ["_archive/", "__pycache__/"]
 SNIPPET = "weaver-hide"
 
-GO = "--go" in sys.argv
+GO = "--go" in sys.argv or os.environ.get("WEAVER_JOB") == "1"
 LOG = []
 
 
@@ -135,8 +135,6 @@ def venv(name):
 
 def main():
     say("# Уборка хранилища %s — %s\n" % (DAY, "ВЫПОЛНЕНО" if GO else "сухой прогон (ничего не меняется)"))
-    if GO and obsidian_running():
-        sys.exit("Закрой Obsidian и запусти ещё раз (он перезаписывает свои настройки и держит файлы).")
 
     say("## 1. Переносы")
     for src, dst, why in MOVES:
@@ -222,7 +220,10 @@ def main():
         ap = {}
     snip_on = SNIPPET in ap.get("enabledCssSnippets", [])
     say("- фрагмент CSS: " + ("уже включён" if snip_on else "включить"))
-    if GO:
+    busy = obsidian_running()
+    if busy and add:
+        say("- Obsidian открыт: исключения допишет отдельная задача, когда он будет закрыт")
+    if GO and not busy:
         if add:
             shutil.copy2(app_json, hist(".obsidian/app.json"))
             cfg["userIgnoreFilters"] = flt + add
@@ -243,24 +244,7 @@ def main():
             else:
                 say("- `%s`: %s" % (d, "останется: " + ", ".join(left) if left else "уберу, когда опустеет"))
 
-    say("\n## 6. Перезапуск моста с новым кодом (guard on/off/keep, кнопки в боте). Программы не закрываются.")
-    if GO:
-        sup = os.path.join(HERE, "supervisor.py")
-        subprocess.run([venv("python.exe"), sup, "stop"])
-        for _ in range(30):                       # wait until the old supervisor has let its lock go
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.bind(("127.0.0.1", 47290))
-                break
-            except OSError:
-                time.sleep(1)
-            finally:
-                s.close()
-        flags = (0x00000008 | 0x00000200) if os.name == "nt" else 0
-        subprocess.Popen([venv("pythonw.exe"), sup], cwd=HERE, creationflags=flags, close_fds=True)
-        say("- мост запущен заново; через ~30 с бот пришлёт «на связи» с кнопками")
-
-    say("\n" + ("Готово. Открой Obsidian: слева Projects · Library · Weaver · Studio_bridge." if GO
+    say("\n" + ("Готово: слева в Obsidian Projects · Library · Weaver · Studio_bridge." if GO
                 else "Это сухой прогон. Выполнить: закрой Obsidian → py Studio_bridge\\weaver_bridge\\reorg_vault.py --go"))
     if GO:
         out = p("Agent/Migrations/" + DAY + "-reorg")

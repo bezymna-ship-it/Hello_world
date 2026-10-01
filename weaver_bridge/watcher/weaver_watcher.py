@@ -58,7 +58,7 @@ VAULT = CFG_B.get("vault", "")
 log = rw.log
 
 LOUD_EVENTS = {"crash", "hang", "loop", "launch_fail", "port", "closed_unknown", "child", "url"}
-QUIET_EVENTS = {"launch", "port_ok", "mode", "start", "dialog"}
+QUIET_EVENTS = {"launch", "port_ok", "mode", "start", "dialog", "update", "job", "job_wait"}
 APP_EMOJI = {"ok": "🟢", "running, MCP off": "🟡", "starting": "🟡", "waiting": "⏳", "hung": "🧊",
              "closed": "⚪", "parked": "⚪", "paused": "🛑", "no exe": "❌"}
 
@@ -322,7 +322,8 @@ class WeaverWatcher(rw.Watcher):
         on = common.read_control().get("bridge", True)
         return [[_b("🛡 Guard ›", "wb|mode"), _b("🧩 Программы ›", "wb|apps")],
                 [_b("🚀 Запустить ›", "wb|runmenu"), _b("🔄 Обновить", "wb|bridge")],
-                [_b("🌐 Мост: %s → %s" % (("on", "off") if on else ("off", "on")), "wb|bridgeask")]]
+                [_b("🌐 Мост: %s → %s" % (("on", "off") if on else ("off", "on")), "wb|bridgeask"),
+                 _b("♻️ Перезапустить мост", "wb|restart")]]
 
     def bridge_ask(self):
         on = common.read_control().get("bridge", True)
@@ -444,6 +445,11 @@ class WeaverWatcher(rw.Watcher):
             self.request_run(key, self.pending_docs.get(doc))
             note = "Запускаю " + key
             text, rows = self.bridge_text(), self.bridge_rows()
+        elif action == "restart":
+            os.makedirs(REQ_DIR, exist_ok=True)
+            open(os.path.join(REQ_DIR, "restart.txt"), "w").close()
+            note = "Перезапускаю мост, ~30 с"
+            text, rows = self.bridge_text() + "\n\n♻️ перезапускаю мост (программы не трогаю)", self.bridge_rows()
         elif action == "bridgeask":
             text, rows = self.bridge_ask()
         elif action.startswith("bridgeset:"):

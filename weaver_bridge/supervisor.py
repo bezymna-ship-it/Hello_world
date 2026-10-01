@@ -18,6 +18,13 @@ What it keeps alive:
 
 control.json (next to this file) is the switchboard: the Obsidian card, the Telegram bot and the
 bridge_control tool all edit it, and it is re-read every loop.
+
+Updates apply by themselves (nothing to run on the PC):
+  * new code: every 10 s the .py files are checked; changed ones are syntax-checked first (an error is
+    reported to the bot and the old code keeps running), then only the changed part restarts -
+    the gateway, the bot, or the supervisor itself (programs stay open);
+  * one-off jobs: a .py file put into jobs/ runs once (vault as working folder), then moves to
+    jobs/done/ (or jobs/failed/); exit code 75 = "not now, try again in 5 minutes". Output: logs/jobs/.
 """
 from __future__ import annotations
 
@@ -41,6 +48,7 @@ except ImportError:  # the venv from install.py has it; plain python may not
 IS_WIN = os.name == "nt"
 NO_WINDOW = 0x08000000 if IS_WIN else 0
 DETACHED = (0x00000008 | 0x00000200 | 0x01000000) if IS_WIN else 0  # DETACHED | NEW_GROUP | BREAKAWAY
+VERSION = 2
 LOCK_PORT = 47290
 LOOP_S = 5
 APPS_EVERY_S = 10
@@ -57,6 +65,14 @@ PID_FILE = os.path.join(STATE_DIR, "supervisor.pid")
 STOP_FLAG = os.path.join(STATE_DIR, "stop.flag")
 URL_FILE = common.home_path(CFG, "connector-url.txt")
 VENV_PY = common.home_path(CFG, "venv", "Scripts" if IS_WIN else "bin", "python.exe" if IS_WIN else "python")
+JOBS_DIR = os.path.join(common.BRIDGE_DIR, "jobs")
+JOB_LOGS = common.home_path(CFG, "logs", "jobs")
+JOB_RETRY = 75                 # a job's exit code for "not now, try again later"
+CODE = {                       # which files belong to which part (relative to this folder)
+    "supervisor": ["supervisor.py", "common.py"],
+    "gateway": ["gateway/*.py", "weaver-server/*.py", "fusion-shim/*.py"],
+    "watcher": ["watcher/*.py", "common.py"],
+}
 
 APP_DEFAULTS = {
     "hang_limit": 300,   # s "Not Responding" before a kill (only in keep mode)
@@ -521,6 +537,144 @@ class App:
 CRASH_SEEN = {}
 
 
+# ------------------------------------------------------------------ self-update and jobs
+def pythonw():
+    py = VENV_PY if os.path.isfile(VENV_PY) else sys.executable
+    return py.replace("python.exe", "pythonw.exe") if IS_WIN else py
+
+
+def code_stamp(pats):
+    out = []
+    for pat in pats:
+        for f in sorted(glob.glob(os.path.join(common.BRIDGE_DIR, pat))):
+            try:
+                out.append((f, os.path.getmtime(f), os.path.getsize(f)))
+            except OSError:
+                pass
+    return tuple(out)
+
+
+def syntax_error(files):
+    """None, or the first syntax error in these files (checked before any restart)."""
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                compile(fh.read(), f, "exec")
+        except SyntaxError as exc:
+            return "%s, строка %s: %s" % (os.path.relpath(f, common.BRIDGE_DIR), exc.lineno, exc.msg)
+        except (OSError, UnicodeDecodeError) as exc:
+            return "%s: %s" % (os.path.relpath(f, common.BRIDGE_DIR), exc)
+    return None
+
+
+def tail(path, lines=12, limit=1500):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = "".join(f.readlines()[-lines:]).strip()
+    except OSError:
+        return ""
+    return text[-limit:]
+
+
+class Updater:
+    """New code -> restart the part it belongs to; files in jobs/ -> run once."""
+
+    def __init__(self, sup):
+        self.sup = sup
+        self.stamps = {k: code_stamp(v) for k, v in CODE.items()}
+        self.bad = {}
+        self.last = 0.0
+        self.job = None
+        self.retry_at = {}
+        self.told_wait = set()
+
+    def tick(self):
+        now = time.time()
+        if now - self.last < 10:
+            return
+        self.last = now
+        self.code(now)
+        self.jobs(now)
+
+    def code(self, now):
+        for part, pats in CODE.items():
+            st = code_stamp(pats)
+            if st == self.stamps[part] or st == self.bad.get(part):
+                continue
+            if any(now - m < 3 for _f, m, _s in st):
+                continue                       # still being written
+            err = syntax_error([f for f, _m, _s in st])
+            if err:
+                self.bad[part] = st
+                event("update_bad", "⚠️ Новый код (%s) с ошибкой — оставила старый, всё работает.\n%s" % (part, err))
+                continue
+            self.stamps[part] = st
+            self.bad.pop(part, None)
+            log("update: %s changed" % part)
+            if part == "supervisor":
+                event("update", "♻️ Обновляю мост (новый код), ~30 с — программы не трогаю")
+                self.sup.restart_self()
+                return
+            child = self.sup.gateway if part == "gateway" else self.sup.watcher
+            event("update", "♻️ %s: новый код, перезапускаю" % {"gateway": "шлюз", "watcher": "бот"}[part])
+            child.stop()
+            child.fails, child.next_try = 0, 0.0
+
+    def jobs(self, now):
+        if self.job:
+            p, name, path, logf, log_path, started = self.job
+            code = p.poll()
+            if code is None:
+                if now - started < 900:
+                    return
+                kill_tree(p.pid)
+                code = -1
+            logf.close()
+            self.job = None
+            out = tail(log_path)
+            if code == JOB_RETRY:
+                self.retry_at[name] = now + 300
+                if name not in self.told_wait:
+                    self.told_wait.add(name)
+                    event("job_wait", "⏳ Задача %s ждёт: %s" % (name, out.splitlines()[-1] if out else "повторю позже"))
+                return
+            dest = os.path.join(JOBS_DIR, "done" if code == 0 else "failed")
+            os.makedirs(dest, exist_ok=True)
+            try:
+                os.replace(path, os.path.join(dest, time.strftime("%Y%m%d-%H%M%S_") + name))
+            except OSError as exc:
+                log("job %s: not moved: %s" % (name, exc))
+                self.retry_at[name] = now + 3600
+            if code == 0:
+                event("job", "✅ Задача %s выполнена%s" % (name, ("\n" + out) if out else ""))
+            else:
+                event("job_fail", "❌ Задача %s не удалась (код %s)%s" % (name, code, ("\n" + out) if out else ""))
+            return
+        for path in sorted(glob.glob(os.path.join(JOBS_DIR, "*.py"))):
+            name = os.path.basename(path)
+            try:
+                if now - os.path.getmtime(path) < 3 or self.retry_at.get(name, 0) > now:
+                    continue
+            except OSError:
+                continue
+            os.makedirs(JOB_LOGS, exist_ok=True)
+            log_path = os.path.join(JOB_LOGS, name[:-3] + ".log")
+            logf = open(log_path, "w", encoding="utf-8", errors="replace")
+            env = dict(os.environ, WEAVER_JOB="1", WEAVER_VAULT=CFG["vault"], WEAVER_HOME=HOME,
+                       PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+            try:
+                p = subprocess.Popen([VENV_PY if os.path.isfile(VENV_PY) else sys.executable, path], cwd=CFG["vault"],
+                                     env=env, stdout=logf, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+            except Exception as exc:
+                logf.close()
+                log("job %s: start failed: %s" % (name, exc))
+                self.retry_at[name] = now + 300
+                continue
+            log("job %s: started" % name)
+            self.job = (p, name, path, logf, log_path, now)
+            return
+
+
 # ------------------------------------------------------------------ main loop
 class Supervisor:
     def __init__(self):
@@ -531,6 +685,20 @@ class Supervisor:
         self.last_apps = 0.0
         self.last_mode = None
         self.vault_status, self.vault_status_t = None, 0.0
+        self.updater = Updater(self)
+        self.restarting = False
+
+    def restart_self(self):
+        """A fresh supervisor (new code) takes over: it asks this one to stop, then starts itself."""
+        if self.restarting:
+            return
+        self.restarting = True
+        try:
+            subprocess.Popen([pythonw(), os.path.abspath(__file__), "restart"], cwd=common.BRIDGE_DIR,
+                             creationflags=DETACHED | NO_WINDOW, close_fds=True)
+        except Exception as exc:
+            self.restarting = False
+            log("restart failed: %s" % exc)
 
     def sync_apps(self):
         specs = CFG.get("apps", {})
@@ -577,6 +745,10 @@ class Supervisor:
                 except Exception as exc:
                     log("%s: tick error: %r" % (a.key, exc))
         self.write_status(ctl)
+        try:
+            self.updater.tick()
+        except Exception as exc:
+            log("updater: %r" % (exc,))
 
     def windows_autostart(self, ctl):
         """control.json "windows_autostart": the Startup-folder entry that starts this supervisor at logon."""
@@ -613,6 +785,10 @@ class Supervisor:
                 os.remove(path)
             except OSError:
                 continue
+            if n.startswith("restart"):    # the bot / the card: "restart the bridge"
+                event("update", "🔄 Перезапускаю мост по кнопке (~30 с, программы не трогаю)")
+                self.restart_self()
+                continue
             a = self.apps.get(m.group(1)) if m else None
             if a is None:
                 continue
@@ -624,7 +800,7 @@ class Supervisor:
 
     def write_status(self, ctl):
         st = {
-            "time": time.time(), "pid": os.getpid(), "mode": ctl["mode"], "bridge": ctl.get("bridge", True),
+            "time": time.time(), "pid": os.getpid(), "version": VERSION, "mode": ctl["mode"], "bridge": ctl.get("bridge", True),
             "windows_autostart": bool(ctl.get("windows_autostart", True)),
             "gateway": "up" if self.gateway.running() and gateway_health() else "down",
             "tunnel": "external" if self.tunnel.kind() == "none" else
@@ -725,6 +901,12 @@ def cmd_status():
 
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if arg == "restart":               # take over from a running supervisor (new code)
+        cmd_stop()
+        for _ in range(30):
+            if acquire_lock_probe():
+                break
+            time.sleep(1)
     if arg == "stop":
         return cmd_stop()
     if arg == "status":
@@ -739,6 +921,8 @@ def main():
     if lock is None:
         print("supervisor already running")
         return
+    if arg == "restart":
+        cleanup_stale()
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
