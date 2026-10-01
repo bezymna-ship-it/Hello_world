@@ -251,6 +251,12 @@ class FolderRenders:
         return "\n".join(lines)
 
 
+def bar(done, total, width=14):
+    """Text progress bar: ████░░░░ ."""
+    fill = int(round(width * min(done, total) / float(total))) if total else 0
+    return "█" * fill + "░" * (width - fill)
+
+
 def guess_app(path):
     p = path.lower()
     for key, name in (("houdini", "Houdini"), ("nuke", "Nuke"), ("fusion", "Fusion"), ("c4d", "Cinema 4D"),
@@ -268,6 +274,7 @@ class WeaverWatcher(rw.Watcher):
         self.folders = FolderRenders(self)
         self.last_folder_job = None
         self.ev_pos = os.path.getsize(EVENTS) if os.path.exists(EVENTS) else 0
+        self.prog = None             # the live progress message of the C4D render that is running
         rw.read_status = lambda: pick_status((self.job or {}).get("pid"))
 
     # ---- bridge pages
@@ -434,11 +441,76 @@ class WeaverWatcher(rw.Watcher):
             else:
                 rw.send(text, kind in QUIET_EVENTS, markup)
 
+    # ---- one live message: bar with rendered / total frames, edited in place
+    def _ptext(self, body):
+        return "🖥 %s\n%s" % (rw.CFG["machine_name"], body)
+
+    def _pbody(self, job, sc, state=""):
+        exp = rw.expected(job)
+        done = sc["frames"]
+        if exp:
+            line = "%s  %d из %d · %d%%" % (bar(done, exp), min(done, exp), exp, int(100 * min(done, exp) / exp))
+        else:
+            line = "кадров записано: %d" % done
+        head = {"done": "✅ Рендер готов", "stopped": "⏹ Рендер остановлен"}.get(state, "🎞 Идёт рендер")
+        tail = "" if state else rw.eta(job, sc)
+        return "%s\n📄 %s\n%s%s" % (head, job.get("doc") or "?", line, tail)
+
+    def progress_tick(self, now):
+        p = self.prog
+        job = self.job
+        if job is None:
+            if p and not p.get("closed"):
+                job = p["job"]
+                sc = rw.scan(rw.watch_dirs(job), job["started"])
+                exp = rw.expected(job)
+                state = "done" if (exp and sc["frames"] >= exp) else "stopped"
+                self._pedit(p, self._pbody(job, sc, state))
+                p["closed"] = True
+            return
+        if not rw.watch_dirs(job):
+            return
+        key = rw.job_key(job)
+        if p is None or p["key"] != key:
+            sc = rw.scan(rw.watch_dirs(job), job["started"])
+            text = self._pbody(job, sc)
+            mid = self._psend(text)
+            self.prog = p = {"key": key, "mid": mid, "text": text, "t": now, "job": job, "closed": False}
+            return
+        if now - p["t"] < 10:                   # Telegram: do not edit more often than every few seconds
+            return
+        p["t"] = now
+        p["job"] = job
+        sc = rw.scan(rw.watch_dirs(job), job["started"])
+        self._pedit(p, self._pbody(job, sc))
+
+    def _psend(self, body):
+        params = {"chat_id": rw.CFG["chat_id"], "text": self._ptext(body), "disable_notification": "true"}
+        try:
+            return rw.tg("sendMessage", params).get("result", {}).get("message_id")
+        except Exception as e:
+            log("progress send: %s" % e)
+            return None
+
+    def _pedit(self, p, body):
+        if body == p.get("text"):
+            return
+        p["text"] = body
+        if not p.get("mid"):
+            p["mid"] = self._psend(body)
+            return
+        try:
+            rw.tg("editMessageText", {"chat_id": rw.CFG["chat_id"], "message_id": p["mid"], "text": self._ptext(body)})
+        except Exception as e:
+            log("progress edit: %s" % e)        # e.g. the message was deleted: next time a new one is sent
+            p["mid"] = None
+
     def tick(self, now=None):
         super().tick(now)
         try:
             with self.lock:
                 self.events_tick()
+                self.progress_tick(now or time.time())
         except Exception as e:
             log("events: %s" % e)
 
