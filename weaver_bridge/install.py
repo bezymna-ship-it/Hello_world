@@ -153,7 +153,7 @@ def detect_apps(old):
                            "crash_globs": [r"%TEMP%\houdini_temp\crash*"]}
         if "steam" in hou.lower():
             apps["houdini"]["steam_appid"] = "502570"
-    nuke = find_first([r"Program Files\Nuke*\Nuke*.exe"])
+    nuke = find_first([r"Program Files\Nuke*\Nuke[0-9]*.exe"])   # not nukeCrashFeedback.exe
     if nuke:
         apps["nuke"] = {"label": "Nuke", "exe": nuke, "port": NUKE_PORT, "crash_globs": []}
     fus = find_first([r"Program Files\Blackmagic Design\Fusion 2*\Fusion.exe",
@@ -163,7 +163,10 @@ def detect_apps(old):
     # what the user corrected by hand in config.json stays
     for k, spec in (old or {}).items():
         if k in apps:
-            apps[k].update({kk: vv for kk, vv in spec.items() if vv not in (None, "")})
+            keep = {kk: vv for kk, vv in spec.items() if vv not in (None, "")}
+            if kk_exe_bad(keep.get("exe")):
+                keep.pop("exe", None)      # a wrong exe picked by an older installer
+            apps[k].update(keep)
         else:
             apps[k] = spec
     for k, spec in apps.items():
@@ -172,6 +175,10 @@ def detect_apps(old):
         else:
             ok("%s -> %s" % (k, spec["exe"]))
     return apps
+
+
+def kk_exe_bad(exe):
+    return bool(exe) and re.search(r"(?i)crash|feedback|uninstall|updater", os.path.basename(exe)) is not None
 
 
 def find_fusion_dll(apps):
