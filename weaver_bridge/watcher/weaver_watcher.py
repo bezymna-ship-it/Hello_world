@@ -58,7 +58,11 @@ VAULT = CFG_B.get("vault", "")
 log = rw.log
 
 LOUD_EVENTS = {"crash", "hang", "loop", "launch_fail", "port", "closed_unknown", "child", "url"}
-QUIET_EVENTS = {"launch", "port_ok", "mode", "start", "dialog", "update", "job", "job_wait"}
+QUIET_EVENTS = {"launch", "port_ok", "mode", "dialog"}
+# the bridge's own housekeeping (code updates, jobs, restarts) is not for the chat: the bot is about
+# the programs and the renders. These stay in <home>/logs/supervisor.log and state/events.jsonl.
+HIDDEN_EVENTS = {"update", "update_bad", "job", "job_wait", "job_fail", "start"}
+HELLO_EVERY = 12 * 3600          # the "on air" message (it brings the keyboard back) at most twice a day
 APP_EMOJI = {"ok": "🟢", "running, MCP off": "🟡", "starting": "🟡", "waiting": "⏳", "hung": "🧊",
              "closed": "⚪", "parked": "⚪", "paused": "🛑", "no exe": "❌"}
 
@@ -491,6 +495,8 @@ class WeaverWatcher(rw.Watcher):
             except ValueError:
                 continue
             kind, text = ev.get("kind"), ev.get("text", "")
+            if kind in HIDDEN_EVENTS or (kind == "url" and not ev.get("changed")):
+                continue
             markup = None
             if kind == "closed_unknown" and ev.get("app"):
                 tag = str(len(self.pending_docs))
@@ -619,8 +625,16 @@ def main():
         log("commands menu: %s" % e)
     log("weaver_watcher started")
     w = WeaverWatcher()
-    rw.send("🟢 weaver_watcher на связи (RenderWatch %s внутри)\nКнопки — внизу чата ↓" % rw.VERSION, True,
-            keyboard())
+    hello = os.path.join(WDIR, "hello.txt")
+    try:
+        last = float(open(hello).read().strip())
+    except (OSError, ValueError):
+        last = 0.0
+    if time.time() - last > HELLO_EVERY:
+        rw.send("🟢 weaver_watcher на связи (RenderWatch %s внутри)\nКнопки — внизу чата ↓" % rw.VERSION, True,
+                keyboard())
+        with open(hello, "w") as f:
+            f.write(str(time.time()))
     threading.Thread(target=w.updates_loop, daemon=True).start()
     threading.Thread(target=w.alarm_loop, daemon=True).start()
     threading.Thread(target=w.folders_loop, daemon=True).start()
