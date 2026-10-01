@@ -5,13 +5,14 @@
     py install.py --telegram              (re)enter the Telegram bot token and chat id
     py install.py --no-autostart          do not start the bridge with Windows
     py install.py --dry-run               only show what was found
+    py install.py --hooks                 only refresh the hooks inside Houdini / Cinema 4D / Nuke
 
 What it does:
   1. home folder (C:\\weaver_bridge): Python venv, the MCP servers of Cinema 4D / Houdini / Nuke / Fusion
      (downloaded from GitHub and patched), cloudflared, logs, secrets.json;
   2. finds the programs: Cinema 4D installs (2026.4+ = Maxon's built-in MCP on 5556, others = plugin on 5555),
      Houdini, Nuke, Fusion -> config.json next to this file (edit paths there if something is wrong);
-  3. puts the hooks into the programs: C4D plugin (+ MCP socket autostart), Houdini pythonrc.py, Nuke menu.py;
+  3. puts the hooks into the programs: C4D plugin (+ MCP socket autostart), Houdini scripts\\123.py + 456.py, Nuke menu.py;
   4. secrets.json: new gateway token, the Cinema 4D 2026.4 MCP token (from ~/.claude.json), Telegram bot;
   5. stops the old Studio Bridge / RenderWatch processes, starts Weaver Bridge, and (unless --no-autostart)
      makes Windows start it at logon.
@@ -277,6 +278,20 @@ def put_block(path, body, comment="#"):
         f.write(text)
 
 
+def remove_block(path):
+    """Take our marked block out of a user script (older installs put the Houdini hook into pythonrc.py)."""
+    if not os.path.isfile(path):
+        return False
+    text = open(path, encoding="utf-8", errors="ignore").read()
+    pat = re.compile(r"\n*" + re.escape(BLOCK_BEGIN) + r".*?" + re.escape(BLOCK_END) + r"\n?", re.S)
+    new = pat.sub("\n", text)
+    if new == text:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new.strip("\n") + "\n" if new.strip() else "")
+    return True
+
+
 HOUDINI_BLOCK = '''
 try:
     import hou
@@ -341,6 +356,50 @@ def install_c4d(home, apps_dir):
             "timeout": 180, "env": {"C4D_HOST": "127.0.0.1", "C4D_PORT": "5555"}}
 
 
+def houdini_hooks(home, mod):
+    """MCP module + weaver_hook into every Documents\\houdiniXX.X; the hook starts from scripts\\123.py and 456.py.
+    123.py runs when Houdini starts without a file, 456.py when it starts with one (or loads one) - both with the UI
+    up. pythonrc.py is too early (no UI yet), so a block that older installs put there is removed."""
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    prefs = [p for p in glob.glob(os.path.join(docs, "houdini*")) if re.search(r"houdini\d+\.\d+$", p)]
+    if not prefs:
+        warn("no Documents\\houdiniXX.X folder (open Houdini once, then re-run)")
+    hook = with_home(os.path.join(HERE, "hooks", "weaver_hook.py"), home)
+    for h in prefs:
+        for pv in ("python3.9libs", "python3.10libs", "python3.11libs", "python3.12libs"):
+            dst = os.path.join(h, pv)
+            os.makedirs(dst, exist_ok=True)
+            if mod and os.path.isfile(mod):
+                shutil.copyfile(mod, os.path.join(dst, "houdini_mcp.py"))
+            with open(os.path.join(dst, "weaver_hook.py"), "w", encoding="utf-8") as f:
+                f.write(hook)
+            remove_block(os.path.join(dst, "pythonrc.py"))
+        for name in ("123.py", "456.py"):
+            put_block(os.path.join(h, "scripts", name), HOUDINI_BLOCK)
+        ok("%s: MCP module + weaver_hook + scripts\\123.py and 456.py (MCP starts with Houdini)" % h)
+
+
+def refresh_hooks(home):
+    """py install.py --hooks: only re-put the hooks into the programs (no downloads, no venvs)."""
+    step("Hooks only")
+    houdini_hooks(home, os.path.join(home, "apps", "houdini-mcp", "houdini_mcp.py"))
+    hook = with_home(os.path.join(HERE, "hooks", "weaver_hook.py"), home)
+    for p, _ver in c4d_prefs_dirs():
+        wb = os.path.join(p, "plugins", "weaver_bridge")
+        if os.path.isdir(wb):
+            with open(os.path.join(wb, "weaver_hook.py"), "w", encoding="utf-8") as f:
+                f.write(hook)
+            shutil.copyfile(os.path.join(HERE, "hooks", "weaver_c4d_plugin.py"), os.path.join(wb, "weaver_bridge.pyp"))
+            ok("%s: Weaver plugin refreshed" % os.path.basename(p))
+    dot = os.path.join(os.path.expanduser("~"), ".nuke")
+    if os.path.isdir(dot):
+        with open(os.path.join(dot, "weaver_hook.py"), "w", encoding="utf-8") as f:
+            f.write(hook)
+        put_block(os.path.join(dot, "menu.py"), NUKE_BLOCK)
+        ok("%s: hook refreshed" % dot)
+    ok("Restart Houdini / Cinema 4D / Nuke so they load the new hooks.")
+
+
 def install_houdini(home, apps_dir):
     step("Houdini: MCP server (port %d) + hook" % HOUDINI_PORT)
     d = os.path.join(apps_dir, "houdini-mcp")
@@ -354,20 +413,7 @@ def install_houdini(home, apps_dir):
     mod = os.path.join(d, "houdini_mcp.py")
     open(mod, "w", encoding="utf-8").write(open(mod, encoding="utf-8").read().replace("port=9876", "port=%d" % HOUDINI_PORT))
     sh([py, os.path.join(HERE, "patches", "patch_houdini.py"), srv])
-    docs = os.path.join(os.path.expanduser("~"), "Documents")
-    prefs = [p for p in glob.glob(os.path.join(docs, "houdini*")) if re.search(r"houdini\d+\.\d+$", p)]
-    if not prefs:
-        warn("no Documents\\houdiniXX.X folder (open Houdini once, then re-run)")
-    hook = with_home(os.path.join(HERE, "hooks", "weaver_hook.py"), home)
-    for h in prefs:
-        for pv in ("python3.9libs", "python3.10libs", "python3.11libs", "python3.12libs"):
-            dst = os.path.join(h, pv)
-            os.makedirs(dst, exist_ok=True)
-            shutil.copyfile(mod, os.path.join(dst, "houdini_mcp.py"))
-            with open(os.path.join(dst, "weaver_hook.py"), "w", encoding="utf-8") as f:
-                f.write(hook)
-            put_block(os.path.join(dst, "pythonrc.py"), HOUDINI_BLOCK)
-        ok("%s: MCP module + weaver_hook + pythonrc.py block (MCP starts with Houdini)" % h)
+    houdini_hooks(home, mod)
     return {"type": "stdio", "label": "Houdini", "command": py, "args": ["houdini_mcp_server.py"], "cwd": d,
             "timeout": 300, "env": {"HOUDINI_PORT": str(HOUDINI_PORT)}}
 
@@ -509,6 +555,7 @@ def main():
     ap.add_argument("--no-autostart", action="store_true")
     ap.add_argument("--autostart-only", choices=["on", "off"])
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--hooks", action="store_true", help="only refresh the hooks inside Houdini / Cinema 4D / Nuke")
     ap.add_argument("--skip", default="", help="comma list: c4d,houdini,nuke,fusion")
     args = ap.parse_args()
 
@@ -518,6 +565,8 @@ def main():
     home = args.home or cfg.get("home") or r"C:\weaver_bridge"
     vault = args.vault or cfg.get("vault") or os.path.dirname(os.path.dirname(HERE))
     venv_py = os.path.join(home, "venv", "Scripts", "python.exe") if IS_WIN else os.path.join(home, "venv", "bin", "python")
+    if args.hooks:
+        return refresh_hooks(home)
     if args.autostart_only:
         return set_autostart(args.autostart_only == "on", venv_py)
 

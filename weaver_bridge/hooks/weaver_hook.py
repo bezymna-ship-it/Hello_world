@@ -127,11 +127,17 @@ def consume_reopen(app):
 
 
 # ------------------------------------------------------------------ Houdini
+_HOU = {}
+
+
 def houdini_start(port=19876):
+    """Called from scripts/123.py and scripts/456.py: once per Houdini session, the second call is a no-op."""
+    if _HOU.get("alive"):
+        return _HOU["alive"]
     import hou
     import hdefereval
 
-    alive = Alive(app_key("houdini", os.path.dirname(os.environ.get("HFS", "") + os.sep + "bin" + os.sep)))
+    alive = _HOU["alive"] = Alive(app_key("houdini", os.path.dirname(os.environ.get("HFS", "") + os.sep + "bin" + os.sep)))
 
     def current():
         p = hou.hipFile.path()
