@@ -2,7 +2,7 @@
 
     pythonw supervisor.py            run (started by Windows at logon, see install.py)
     python  supervisor.py status     what runs right now
-    python  supervisor.py stop       stop the supervisor and everything it started (programs stay open)
+    python  supervisor.py stop       stop the supervisor, gateway, tunnel and bot (programs stay open)
     python  supervisor.py url        print the connector URL (secret - do not share)
 
 What it keeps alive:
@@ -53,6 +53,7 @@ REOPEN_DIR = os.path.join(STATE_DIR, "reopen")
 REQ_DIR = os.path.join(STATE_DIR, "requests")   # the bot asks for things here: launch_<app>[.txt = scene]
 STATUS_FILE = os.path.join(STATE_DIR, "supervisor.json")
 PID_FILE = os.path.join(STATE_DIR, "supervisor.pid")
+STOP_FLAG = os.path.join(STATE_DIR, "stop.flag")
 URL_FILE = common.home_path(CFG, "connector-url.txt")
 VENV_PY = common.home_path(CFG, "venv", "Scripts" if IS_WIN else "bin", "python.exe" if IS_WIN else "python")
 
@@ -657,16 +658,54 @@ def acquire_lock():
 
 
 def cmd_stop():
+    """Ask the running supervisor to stop its helpers and exit. Never a tree kill: the programs it
+    started (Cinema 4D, Houdini ...) count as its children on Windows and must stay open."""
+    if acquire_lock_probe():
+        print("supervisor is not running")
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    open(STOP_FLAG, "w").close()
+    for _ in range(30):
+        time.sleep(1)
+        if acquire_lock_probe():
+            print("supervisor stopped (programs stay open)")
+            return
     pid = None
     try:
         pid = int(open(PID_FILE).read().strip())
     except Exception:
         pass
-    if pid:
-        kill_tree(pid)   # /T takes the gateway, tunnel and bot with it; the programs were started detached
-        print("stopped supervisor pid %d" % pid)
-    else:
-        print("supervisor is not running")
+    if pid and psutil:
+        try:
+            psutil.Process(pid).kill()   # only the supervisor itself
+            print("supervisor did not answer, killed pid %d" % pid)
+        except Exception as exc:
+            print("could not stop pid %s: %s" % (pid, exc))
+
+
+def acquire_lock_probe():
+    s = acquire_lock()
+    if s is None:
+        return False
+    s.close()
+    return True
+
+
+def cleanup_stale():
+    """Helpers left over by a supervisor that was killed: they would hold the ports."""
+    if psutil is None:
+        return
+    gw = os.path.join(common.BRIDGE_DIR, "gateway", "gateway.py").lower()
+    bot = os.path.join(common.BRIDGE_DIR, "watcher", "weaver_watcher.py").lower()
+    cf = common.home_path(CFG, "bin", "cloudflared.exe").lower()
+    for p in psutil.process_iter(["pid", "cmdline", "exe"]):
+        try:
+            cmd = " ".join(p.info["cmdline"] or []).lower()
+            if gw in cmd or bot in cmd or (p.info["exe"] or "").lower() == cf:
+                kill_tree(p.info["pid"])
+                log("killed a leftover helper pid %d" % p.info["pid"])
+        except Exception:
+            continue
 
 
 def cmd_status():
@@ -704,20 +743,28 @@ def main():
         f.write(str(os.getpid()))
     if psutil is None:
         log("psutil missing: programs are not watched (run install.py)")
+    if os.path.exists(STOP_FLAG):
+        os.remove(STOP_FLAG)
+    cleanup_stale()
     sup = Supervisor()
     sup.sync_apps()
     log("supervisor started (pid %d), mode %s" % (os.getpid(), common.read_control()["mode"]))
     event("start", "🟢 Weaver Bridge запущен. Сторож: %s" % common.MODE_TEXT[common.read_control()["mode"]])
     try:
-        while True:
+        while not os.path.exists(STOP_FLAG):
             try:
                 sup.tick()
             except Exception as exc:
                 log("loop error: %r" % (exc,))
             time.sleep(LOOP_S)
+        log("stop requested")
     finally:
         sup.shutdown()
         lock.close()
+        try:
+            os.remove(STOP_FLAG)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
