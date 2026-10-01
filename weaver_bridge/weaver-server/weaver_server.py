@@ -187,11 +187,11 @@ def weaver_context() -> str:
     hub = root / "weaver_claude"
     out: list[str] = []
     if (hub / "00_start.md").is_file():
-        out.append("# Weaver - context from weaver_claude/ (edit the rules there: weaver_claude/01_rules.md)\n")
+        out.append("# Weaver - context from weaver_claude/ (the rules the user edits: Weaver/Правила.md)\n")
         _expand_imports(root, "@weaver_claude/00_start.md", out)
         files = sorted(p.relative_to(root).as_posix() for p in hub.rglob("*.md"))
         out.append("\nFiles in weaver_claude/ (read with vault_read when needed):\n" + "\n".join("- " + f for f in files))
-        for gen in ("Agent/STATE.md", "Agent/PROJECTS.md"):
+        for gen in ("Agent/STATE.md",):
             if (root / gen).is_file():
                 _expand_imports(root, "@" + gen, out)
         return "\n".join(out)

@@ -360,7 +360,7 @@ class App:
         self.port_down_since = None
         self.port_warned = False
         self.pending = None          # {"why", "reopen", "at"} - start after cooldown
-        self.parked = False          # the user closed it on purpose (crash mode leaves it closed)
+        self.parked = False          # the user closed it on purpose (guard "on" leaves it closed)
         self.state = "closed"
         self.port = None
 
@@ -507,7 +507,7 @@ class App:
         if (markers and self.spec.get("trust_exit_hook")) or evidence:
             event("crash", "💥 %s УПАЛА%s%s" % (self.label, (" (%s)" % evidence) if evidence else "",
                                                ("\n📄 сцена: %s" % doc) if doc else ""), app=self.key)
-            if watched and mode in ("crash", "keep") and not still_running:
+            if watched and mode in ("on", "keep") and not still_running:
                 self.pending = {"why": "после падения", "reopen": doc, "at": time.time() + 10}
         else:
             event("closed_unknown", "❔ %s закрылась, падение не подтверждено — сама не запускаю.\n"
@@ -554,7 +554,7 @@ class Supervisor:
         mode = ctl["mode"]
         if mode != self.last_mode:
             if self.last_mode is not None:
-                event("mode", "🎛 Сторож: %s" % common.MODE_TEXT[mode])
+                event("mode", "🛡 Guard: %s" % common.MODE_TEXT[mode])
             self.last_mode = mode
         now = time.time()
         if now - self.last_apps >= APPS_EVERY_S:
@@ -715,7 +715,7 @@ def cmd_status():
         return
     age = time.time() - st.get("time", 0)
     print("supervisor pid %s, updated %ds ago%s" % (st.get("pid"), age, "  (STALE: not running?)" if age > 60 else ""))
-    print("mode: %s | bridge: %s | gateway: %s | tunnel: %s | bot: %s" % (
+    print("guard: %s | bridge: %s | gateway: %s | tunnel: %s | bot: %s" % (
         common.MODE_TEXT.get(st.get("mode"), st.get("mode")), st.get("bridge"), st.get("gateway"),
         st.get("tunnel"), st.get("watcher")))
     for k, a in st.get("apps", {}).items():
@@ -749,7 +749,7 @@ def main():
     sup = Supervisor()
     sup.sync_apps()
     log("supervisor started (pid %d), mode %s" % (os.getpid(), common.read_control()["mode"]))
-    event("start", "🟢 Weaver Bridge запущен. Сторож: %s" % common.MODE_TEXT[common.read_control()["mode"]])
+    event("start", "🟢 Weaver Bridge запущен. Guard: %s" % common.MODE_TEXT[common.read_control()["mode"]])
     try:
         while not os.path.exists(STOP_FLAG):
             try:

@@ -9,8 +9,9 @@ crashed render through Commandline, /settings /status /preview /video. On top of
   * folder renders (Houdini, Nuke, Fusion, anything): new frames in the folders of config.json
     "watch_render_dirs" (Projects/*/*/Passes ...) -> start, frames with previews, finish + mp4;
     new mp4 in Output/Videos are sent as they are;
-  * the bridge: /bridge (what runs), /mode (watchdog mode), /apps (which programs it watches),
-    /run (start a program), /url (connector URL), and the supervisor's events (crash, restart, new URL).
+  * the bridge: pages Мост (what runs), Guard (off / on / keep), Программы (which ones guard watches),
+    Запустить, Адрес (connector URL), and the supervisor's events (crash, restart, new URL);
+  * a keyboard under the chat (Telegram reply keyboard) - every function is a button, nothing to type.
 
 Only the owner chat (telegram_chat_id in <home>/secrets.json) is answered.
 """
@@ -64,6 +65,25 @@ APP_EMOJI = {"ok": "🟢", "running, MCP off": "🟡", "starting": "🟡", "wait
 
 def _b(text, data):
     return {"text": text, "callback_data": data}
+
+
+# the keyboard under the chat: button text -> what it does
+MENU = [["🔌 Мост", "🛡 Guard", "🧩 Программы"],
+        ["🎞 Рендер", "🖼 Превью", "🎬 Видео"],
+        ["🚀 Запустить", "⚙️ Настройки", "🔗 Адрес"]]
+MENU_ACTIONS = {"🔌 мост": "bridge", "🛡 guard": "guard", "🧩 программы": "apps", "🎞 рендер": "renders",
+                "🖼 превью": "/preview", "🎬 видео": "/video", "🚀 запустить": "run", "⚙️ настройки": "/settings",
+                "🔗 адрес": "url"}
+TYPED = {"/bridge": "bridge", "мост": "bridge", "/guard": "guard", "guard": "guard", "/mode": "guard",
+         "режим": "guard", "/apps": "apps", "программы": "apps", "/run": "run", "/url": "url", "адрес": "url",
+         "/renders": "renders", "рендеры": "renders", "/help": "help", "помощь": "help", "/menu": "menu",
+         "/start": "menu", "меню": "menu", "/keyboard": "menu"}
+GUARD = [("off", "⏸", "off"), ("on", "🛡", "on"), ("keep", "🔒", "keep")]
+
+
+def keyboard():
+    return {"keyboard": [[{"text": x} for x in r] for r in MENU], "resize_keyboard": True, "is_persistent": True,
+            "input_field_placeholder": "кнопки внизу ↓"}
 
 
 def edit_or_send(msg, text, rows):
@@ -285,7 +305,9 @@ class WeaverWatcher(rw.Watcher):
         age = time.time() - st.get("time", 0)
         lines = ["🔌 Weaver Bridge%s" % ("  ⚠️ статус устарел (%s) — supervisor не работает?" % rw.dur(age)
                                          if age > 60 else ""),
-                 "🎛 Сторож: %s" % common.MODE_TEXT.get(st.get("mode"), st.get("mode")),
+                 "🛡 Guard: %s" % common.MODE_TEXT.get(common.MODE_ALIASES.get(st.get("mode"), st.get("mode")),
+                                                     st.get("mode")),
+                 "🌐 мост (доступ Claude из облака): %s" % ("on" if st.get("bridge", True) else "off"),
                  "🌐 шлюз: %s · туннель: %s" % (st.get("gateway"), st.get("tunnel")), ""]
         for k in common.APP_ORDER + tuple(a for a in st.get("apps", {}) if a not in common.APP_ORDER):
             a = st.get("apps", {}).get(k)
@@ -293,22 +315,39 @@ class WeaverWatcher(rw.Watcher):
                 continue
             port = {True: " · MCP ✅", False: " · MCP ❌", None: ""}[a.get("port")]
             lines.append("%s %s — %s%s%s" % (APP_EMOJI.get(a["state"], "•"), a["label"], a["state"], port,
-                                             "" if a.get("watched") else " · не под сторожем"))
+                                             "" if a.get("watched") else " · guard не следит"))
         return "\n".join(lines)
 
     def bridge_rows(self):
-        return [[_b("🎛 Режим сторожа ›", "wb|mode"), _b("🧩 Программы ›", "wb|apps")],
-                [_b("🚀 Запустить ›", "wb|runmenu"), _b("🔄 Обновить", "wb|bridge")]]
+        on = common.read_control().get("bridge", True)
+        return [[_b("🛡 Guard ›", "wb|mode"), _b("🧩 Программы ›", "wb|apps")],
+                [_b("🚀 Запустить ›", "wb|runmenu"), _b("🔄 Обновить", "wb|bridge")],
+                [_b("🌐 Мост: %s → %s" % (("on", "off") if on else ("off", "on")), "wb|bridgeask")]]
+
+    def bridge_ask(self):
+        on = common.read_control().get("bridge", True)
+        if not on:
+            return self.set_bridge(True)
+        return ("🌐 Выключить мост?\n\nClaude из облака перестанет видеть программы на ПК, пока не включишь "
+                "обратно (здесь или на пульте в Obsidian). Бот и guard продолжат работать.",
+                [[_b("Да, выключить", "wb|bridgeset:off"), _b("Нет", "wb|bridge")]])
+
+    def set_bridge(self, on):
+        ctl = common.read_control()
+        ctl["bridge"] = bool(on)
+        common.write_control(ctl, "telegram")
+        return self.bridge_text() + "\n\n" + ("🌐 мост включаю (до 30 с)" if on else "🌐 мост выключен"), \
+            self.bridge_rows()
 
     def mode_page(self):
         cur = common.read_control()["mode"]
-        text = ("🎛 Режим сторожа\n\n"
-                "⏸ off — ничего не запускает\n"
-                "🩹 crash — поднимает программу, только если она упала (я за компом)\n"
-                "🔒 keep — держит программы открытыми, поднимает после падения и зависания (меня нет)\n\n"
+        text = ("🛡 Guard — что делать с программами\n\n"
+                "⏸ off — ничего не запускает и не трогает\n"
+                "🛡 on — если программа упала: закрывает окно ошибки и открывает её снова со сценой. "
+                "Закрыла сама — не трогает (я за компом)\n"
+                "🔒 keep — держит открытыми: запускает закрытые, поднимает после падения и зависания (меня нет)\n\n"
                 "Сейчас: %s" % common.MODE_TEXT[cur])
-        rows = [[_b(("✅ " if cur == m else "") + label, "wb|setmode:" + m)]
-                for m, label in (("off", "⏸ off"), ("crash", "🩹 crash"), ("keep", "🔒 keep"))]
+        rows = [[_b(("✅ " if cur == m else "") + icon + " " + label, "wb|setmode:" + m) for m, icon, label in GUARD]]
         return text, rows + [[_b("‹ Мост", "wb|bridge")]]
 
     def apps_page(self):
@@ -318,7 +357,7 @@ class WeaverWatcher(rw.Watcher):
         rows = [[_b("%s %s" % ("✅" if v else "❌", labels.get(k, k)), "wb|toggle:" + k)]
                 for k, v in sorted(ctl["apps"].items(), key=lambda kv: common.APP_ORDER.index(kv[0])
                                    if kv[0] in common.APP_ORDER else 99)]
-        return "🧩 Какие программы под сторожем", rows + [[_b("‹ Мост", "wb|bridge")]]
+        return "🧩 За какими программами следит guard (✅ — следит)", rows + [[_b("‹ Мост", "wb|bridge")]]
 
     def run_page(self):
         st = common.read_json(SUP_STATUS, {}) or {}
@@ -344,30 +383,42 @@ class WeaverWatcher(rw.Watcher):
         if not cq and str(m.get("chat", {}).get("id")) == str(rw.CFG["chat_id"]):
             txt = (m.get("text") or "").strip()
             low = txt.lower()
-            if low in ("/bridge", "мост"):
-                return edit_or_send(None, self.bridge_text(), self.bridge_rows())
-            if low in ("/mode", "режим"):
-                return edit_or_send(None, *self.mode_page())
-            if low in ("/apps", "программы"):
-                return edit_or_send(None, *self.apps_page())
-            if low.startswith("/run"):
-                arg = txt[4:].strip().lower()
-                if not arg:
-                    return edit_or_send(None, *self.run_page())
+            act = MENU_ACTIONS.get(low)
+            if act and self.alarm:
+                self.stop_alarm(announce=True)        # any button also silences an alarm
+            if act and act.startswith("/"):
+                m["text"] = act                       # RenderWatch's own commands
+                return super().handle_update(u)
+            act = act or TYPED.get(low)
+            if low.startswith("/run ") and len(txt) > 5:
+                arg = txt[5:].strip().lower()
                 self.request_run(arg)
-                return rw.send("🚀 Попросила сторож запустить %s" % arg, True)
-            if low in ("/url", "адрес"):
-                try:
-                    url = open(URL_FILE, encoding="utf-8").read().strip()
-                except OSError:
-                    url = ""
-                return rw.send(("🔗 Адрес коннектора (секрет, никому не пересылай):\n%s" % url) if url
-                               else "Адреса пока нет (туннель не поднялся?)", True)
-            if low in ("/renders", "рендеры"):
-                return rw.send(self.folders.text() + "\n\n" + self.status_text(), True)
-            if low in ("/help", "помощь"):
-                return rw.send(HELP, True)
+                return rw.send("🚀 Попросила guard запустить %s" % arg, True)
+            if act:
+                return self.menu_action(act)
         return super().handle_update(u)
+
+    def menu_action(self, act):
+        if act == "bridge":
+            return edit_or_send(None, self.bridge_text(), self.bridge_rows())
+        if act == "guard":
+            return edit_or_send(None, *self.mode_page())
+        if act == "apps":
+            return edit_or_send(None, *self.apps_page())
+        if act == "run":
+            return edit_or_send(None, *self.run_page())
+        if act == "url":
+            try:
+                url = open(URL_FILE, encoding="utf-8").read().strip()
+            except OSError:
+                url = ""
+            return rw.send(("🔗 Адрес коннектора (секрет, никому не пересылай):\n%s" % url) if url
+                           else "Адреса пока нет (туннель не поднялся?)", True)
+        if act == "renders":
+            return rw.send(self.folders.text() + "\n\n" + self.status_text(), True)
+        if act == "help":
+            return rw.send(HELP, True, keyboard())
+        return rw.send("Кнопки — внизу чата ↓", True, keyboard())
 
     def wb_button(self, cq, msg):
         action = cq["data"][3:]
@@ -376,7 +427,7 @@ class WeaverWatcher(rw.Watcher):
             ctl = common.read_control()
             ctl["mode"] = action[8:]
             common.write_control(ctl, "telegram")
-            note = "Режим: " + ctl["mode"]
+            note = "Guard: " + ctl["mode"]
             text, rows = self.mode_page()
         elif action.startswith("toggle:"):
             ctl = common.read_control()
@@ -393,6 +444,11 @@ class WeaverWatcher(rw.Watcher):
             self.request_run(key, self.pending_docs.get(doc))
             note = "Запускаю " + key
             text, rows = self.bridge_text(), self.bridge_rows()
+        elif action == "bridgeask":
+            text, rows = self.bridge_ask()
+        elif action.startswith("bridgeset:"):
+            text, rows = self.set_bridge(action[10:] == "on")
+            note = "Мост: " + action[10:]
         elif action == "mode":
             text, rows = self.mode_page()
         elif action == "apps":
@@ -527,15 +583,15 @@ class WeaverWatcher(rw.Watcher):
         return super().current_view() or self.last_folder_job
 
 
-HELP = ("Команды:\n"
-        "/bridge — мост: что открыто и подключено\n"
-        "/mode — режим сторожа (off / crash / keep)\n"
-        "/apps — какие программы под сторожем\n"
-        "/run — запустить программу\n"
-        "/url — адрес коннектора для claude.ai\n"
-        "/renders — рендеры сейчас (C4D и папки)\n"
-        "/status · /preview · /video — рендер C4D\n"
-        "/settings — уведомления, тревоги, авторестарт рендера")
+HELP = ("Всё — кнопками внизу чата:\n"
+        "🔌 Мост — что открыто и подключено; там же мост on/off\n"
+        "🛡 Guard — off / on / keep\n"
+        "🧩 Программы — за какими следит guard\n"
+        "🚀 Запустить — открыть программу на ПК\n"
+        "🎞 Рендер · 🖼 Превью · 🎬 Видео — рендер сейчас, последний кадр, видео из кадров\n"
+        "⚙️ Настройки — уведомления, тревоги, авторестарт рендера\n"
+        "🔗 Адрес — адрес коннектора для claude.ai (секрет)\n\n"
+        "Пропали кнопки — нажми ☰ Меню → «Кнопки» или /menu.")
 
 
 def main():
@@ -551,22 +607,14 @@ def main():
     cleanup_status_files()
     try:
         rw.tg("setMyCommands", {"commands": json.dumps([
-            {"command": "bridge", "description": "Мост: что открыто и подключено"},
-            {"command": "mode", "description": "Режим сторожа"},
-            {"command": "apps", "description": "Программы под сторожем"},
-            {"command": "run", "description": "Запустить программу"},
-            {"command": "renders", "description": "Рендеры сейчас"},
-            {"command": "status", "description": "Рендер C4D"},
-            {"command": "preview", "description": "Последний кадр"},
-            {"command": "video", "description": "Видео из готовых кадров"},
-            {"command": "url", "description": "Адрес коннектора"},
-            {"command": "settings", "description": "Настройки уведомлений"},
-            {"command": "help", "description": "Помощь"}], ensure_ascii=False)})
+            {"command": "menu", "description": "Кнопки"},
+            {"command": "help", "description": "Что умеет бот"}], ensure_ascii=False)})
     except Exception as e:
         log("commands menu: %s" % e)
     log("weaver_watcher started")
     w = WeaverWatcher()
-    rw.send("🟢 weaver_watcher на связи (RenderWatch %s внутри)\n/help — команды" % rw.VERSION, silent=True)
+    rw.send("🟢 weaver_watcher на связи (RenderWatch %s внутри)\nКнопки — внизу чата ↓" % rw.VERSION, True,
+            keyboard())
     threading.Thread(target=w.updates_loop, daemon=True).start()
     threading.Thread(target=w.alarm_loop, daemon=True).start()
     threading.Thread(target=w.folders_loop, daemon=True).start()

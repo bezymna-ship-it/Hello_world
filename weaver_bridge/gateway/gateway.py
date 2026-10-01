@@ -18,7 +18,7 @@ path is the only protection once it is exposed through a tunnel, so keep the URL
 
 Tools are re-exported with a prefix (c4d__..., c4d26__..., houdini__...), plus built-ins:
   bridge_status   what is connected, and the autostart switches
-  bridge_control  watchdog mode (off / crash / keep) and which programs it watches
+  bridge_control  guard mode (off / on / keep) and which programs it watches
 
 The last tool list of every server is cached on disk, so the tools stay visible in claude.ai while
 a program is closed (a call then answers "not running yet" instead of the tool disappearing).
@@ -232,10 +232,11 @@ def _text(text: str) -> types.CallToolResult:
 
 # ---------------------------------------------------------------------------- control.json
 MODES = {
-    "off": "off - the watchdog does nothing",
-    "crash": "crash - restarts a program only after it crashed (the user is at the PC)",
+    "off": "off - guard does nothing",
+    "on": "on - restarts a program only after it crashed and closes crash dialogs (the user is at the PC)",
     "keep": "keep - keeps the watched programs open: starts them, restarts after a crash or a hang (nobody at the PC)",
 }
+MODE_ALIASES = {"crash": "on"}   # the old name of "on"
 
 
 class Control:
@@ -266,8 +267,9 @@ class Control:
         apps = c.get("apps", {})
         on = [k for k, v in apps.items() if v]
         off = [k for k, v in apps.items() if not v]
-        return ("watchdog mode: %s\n  watched: %s\n  not watched: %s\n  changed %s by %s" % (
-            MODES.get(c.get("mode"), c.get("mode")), ", ".join(on) or "-", ", ".join(off) or "-",
+        mode = MODE_ALIASES.get(c.get("mode"), c.get("mode"))
+        return ("guard: %s\n  watched: %s\n  not watched: %s\n  changed %s by %s" % (
+            MODES.get(mode, mode), ", ".join(on) or "-", ", ".join(off) or "-",
             c.get("updated", "?"), c.get("updated_by", "?")))
 
 
@@ -278,13 +280,13 @@ def build_server(downstreams: dict[str, Downstream], control: Control) -> Server
         name="bridge_status",
         description="Show which programs on the user's PC (Cinema 4D, Houdini, Fusion, Nuke, Weaver ...) "
         "are connected to the Weaver Bridge, how many tools each has, and whether the watchdog "
-        "(autostart and restart after a crash) is on.",
+        "guard (restart after a crash, keep open) is on.",
         inputSchema={"type": "object", "properties": {}},
     )
     control_tool = types.Tool(
         name="bridge_control",
-        description="Show or change the watchdog on the user's PC. Modes: " + "; ".join(MODES.values()) + ". "
-        "action 'mode' with value off/crash/keep sets the mode; action 'watch' / 'unwatch' with target "
+        description="Show or change guard (the watchdog) on the user's PC. Modes: " + "; ".join(MODES.values()) + ". "
+        "action 'mode' with value off/on/keep sets the guard mode; action 'watch' / 'unwatch' with target "
         "(c4d, c4d26, houdini, nuke, fusion) adds or removes one program; action 'show' prints the state. "
         "Only change it when the user asks.",
         inputSchema={
@@ -344,6 +346,7 @@ def _control(control: Control, args: dict[str, Any], names: list[str]) -> types.
     apps = data.setdefault("apps", {})
     if action == "mode":
         value = str(args.get("value") or "").lower()
+        value = MODE_ALIASES.get(value, value)
         if value not in MODES:
             return _error("value must be one of: " + ", ".join(MODES))
         data["mode"] = value

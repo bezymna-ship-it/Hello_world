@@ -225,8 +225,17 @@ def bearer_from_c4d_prefs():
     return ""
 
 
+# RenderWatch 2.0 (the bot core): next to this folder, or in the archive after the 2026-10-01 reorg
+RENDERWATCH_DIRS = [os.path.join(os.path.dirname(HERE), "RenderWatch")] + sorted(
+    glob.glob(os.path.join(os.path.dirname(os.path.dirname(HERE)), "_archive", "*", "RenderWatch")), reverse=True)
+
+
 def renderwatch_bot():
-    cfg = common.read_json(os.path.join(os.path.dirname(HERE), "RenderWatch", "watchdog", "config.json"), {}) or {}
+    cfg = {}
+    for d in RENDERWATCH_DIRS:
+        cfg = common.read_json(os.path.join(d, "watchdog", "config.json"), {}) or {}
+        if cfg:
+            break
     tok, chat = str(cfg.get("telegram_token", "")), str(cfg.get("chat_id", ""))
     if re.match(r"^\d{6,}:[\w-]{20,}$", tok) and re.match(r"^-?\d{5,}$", chat):
         return tok, chat
@@ -654,17 +663,20 @@ def main():
     cfg.setdefault("tunnel", {"type": "cloudflare", "ngrok_domain": "", "public_url": ""})
     cfg.setdefault("watch_render_dirs", ["Projects/*/*/Passes", "Projects/*/*/Output/Videos"])
     common.write_json(common.CONFIG_FILE, cfg)
-    ctl = common.read_control() if os.path.isfile(common.CONTROL_FILE) else {"mode": "crash", "bridge": True, "apps": {}}
+    ctl = common.read_control() if os.path.isfile(common.CONTROL_FILE) else {"mode": "on", "bridge": True, "apps": {}}
     for k in apps:
         ctl["apps"].setdefault(k, True)
     ctl["windows_autostart"] = not args.no_autostart
     common.write_control(ctl, "install.py")
-    ok("mode: %s; watched: %s" % (ctl["mode"], ", ".join(k for k, v in ctl["apps"].items() if v)))
+    ok("guard: %s; watched: %s" % (ctl["mode"], ", ".join(k for k, v in ctl["apps"].items() if v)))
 
     step("Telegram bot core (RenderWatch 2.0)")
-    rw_src = os.path.join(os.path.dirname(HERE), "RenderWatch", "watchdog", "render_watchdog.py")
     rw_dst = os.path.join(HERE, "watcher", "render_watchdog_base.py")
-    if os.path.isfile(rw_src):
+    rw_src = next((s for s in (os.path.join(d, "watchdog", "render_watchdog.py") for d in RENDERWATCH_DIRS)
+                   if os.path.isfile(s)), "RenderWatch/watchdog/render_watchdog.py")
+    if os.path.isfile(rw_dst):
+        ok("watcher/render_watchdog_base.py is in place")
+    elif os.path.isfile(rw_src):
         shutil.copyfile(rw_src, rw_dst)
         ok("render_watchdog.py -> watcher/render_watchdog_base.py")
     elif not os.path.isfile(rw_dst):
@@ -702,7 +714,7 @@ def main():
             pass
     else:
         warn("no tunnel URL yet - run url.cmd in a minute (log: %s\\logs\\tunnel.log)" % home)
-    print("\nDone. The switches: Obsidian card Studio_bridge/weaver_bridge/weaver_bridge.md, the Telegram bot, "
+    print("\nDone. The switches: Obsidian card Studio_bridge/Studio_bridge.md, the buttons of the Telegram bot, "
           "or bridge_control from Claude.")
 
 

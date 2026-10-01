@@ -1,7 +1,8 @@
 """Shared bits of Weaver Bridge: paths, config, control switches, events (stdlib only).
 
 Two places on the PC:
-  * the vault folder  <vault>\\Studio_bridge\\weaver_bridge   code, config.json, control.json, the Obsidian card
+  * the vault folder  <vault>\\Studio_bridge\\weaver_bridge   code, config.json, control.json (hidden in Obsidian;
+    the switches are the card Studio_bridge\\Studio_bridge.md)
     (readable and editable from the cloud through the weaver__ tools);
   * the home folder   C:\\weaver_bridge (config "home")   venvs, downloaded MCP servers, cloudflared, logs,
     state and secrets.json - NOTHING secret ever sits in the vault.
@@ -16,11 +17,13 @@ BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BRIDGE_DIR, "config.json")
 CONTROL_FILE = os.path.join(BRIDGE_DIR, "control.json")
 
-MODES = ("off", "crash", "keep")
+# guard: what the supervisor does with the programs ("crash" is the old name of "on")
+MODES = ("off", "on", "keep")
+MODE_ALIASES = {"crash": "on"}
 MODE_TEXT = {
-    "off": "выключен — ничего не запускает",
-    "crash": "после падения — поднимает программу только если она упала",
-    "keep": "держать открытыми — запускает, поднимает после падения и зависания",
+    "off": "off — ничего не запускает и не трогает",
+    "on": "on — поднимает программу, если она упала (закрыла сама — не трогает)",
+    "keep": "keep — держит открытыми: запускает закрытые, поднимает после падения и зависания",
 }
 APP_ORDER = ("c4d", "c4d26", "houdini", "nuke", "fusion")
 
@@ -63,7 +66,8 @@ def read_control():
     c = read_json(CONTROL_FILE, None)
     if not isinstance(c, dict):
         c = {}
-    if c.get("mode") not in MODES:
+    c["mode"] = MODE_ALIASES.get(c.get("mode"), c.get("mode"))
+    if c["mode"] not in MODES:
         c["mode"] = "off"
     c.setdefault("bridge", True)
     c.setdefault("apps", {})

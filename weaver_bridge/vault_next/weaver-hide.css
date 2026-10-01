@@ -1,0 +1,37 @@
+/* ============================================================
+   Weaver — скрыть служебное из проводника Obsidian.
+   Видно только: Projects · Library · Weaver · Studio_bridge.
+   Файлы НЕ удаляются и остаются доступны (плитки в Weaver.md, кнопки пульта, агенты):
+     weaver_claude/              ядро, карта ПК, скиллы, cmd_claude — для агентов
+     Studio_bridge/weaver_bridge код моста, control.json, status.json — кнопки на пульте Studio_bridge.md
+     Agent/, Eagle_lib/, _archive/, CLAUDE.md, AGENTS.md, Context.md, Thumbs/
+   Выключить: Настройки → Оформление → Фрагменты CSS → weaver-hide.
+   ============================================================ */
+
+.nav-folder:has(> .nav-folder-title[data-path="Library/insta ref"]) .nav-folder-children,
+.nav-folder:has(> .nav-folder-title[data-path="Library/web ref"]) .nav-folder-children,
+.nav-folder:has(> .nav-folder-title[data-path="Agent"]),
+.nav-folder:has(> .nav-folder-title[data-path="Eagle_lib"]),
+.nav-folder:has(> .nav-folder-title[data-path="weaver_claude"]),
+.nav-folder:has(> .nav-folder-title[data-path="_archive"]),
+.nav-folder:has(> .nav-folder-title[data-path="Studio_bridge/weaver_bridge"]),
+.nav-folder:has(> .nav-folder-title[data-path$="/Thumbs"]),
+.nav-folder:has(> .nav-folder-title[data-path$="__pycache__"]),
+.nav-file:has(> .nav-file-title[data-path="CLAUDE.md"]),
+.nav-file:has(> .nav-file-title[data-path="AGENTS.md"]),
+.nav-file:has(> .nav-file-title[data-path$="/Context.md"]) {
+  display: none !important;
+}
+
+/* запасной путь, если :has() недоступен — прячем хотя бы заголовки */
+.nav-folder-title[data-path="Agent"],
+.nav-folder-title[data-path="Eagle_lib"],
+.nav-folder-title[data-path="weaver_claude"],
+.nav-folder-title[data-path="_archive"],
+.nav-folder-title[data-path="Studio_bridge/weaver_bridge"],
+.nav-file-title[data-path="CLAUDE.md"],
+.nav-file-title[data-path="AGENTS.md"],
+.nav-file-title[data-path$="/Context.md"],
+.nav-folder-title[data-path$="/Thumbs"] {
+  display: none !important;
+}
