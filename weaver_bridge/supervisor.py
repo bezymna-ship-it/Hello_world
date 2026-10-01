@@ -20,7 +20,7 @@ control.json (next to this file) is the switchboard: the Obsidian card, the Tele
 bridge_control tool all edit it, and it is re-read every loop.
 
 Updates apply by themselves (nothing to run on the PC):
-  * new code: every 10 s the .py files are checked; changed ones are syntax-checked first (an error is
+  * new code: every 10 s the .py files (and config.json) are checked; changed ones are syntax-checked first (an error is
     reported to the bot and the old code keeps running), then only the changed part restarts -
     the gateway, the bot, or the supervisor itself (programs stay open);
   * one-off jobs: a .py file put into jobs/ runs once (vault as working folder), then moves to
@@ -29,6 +29,7 @@ Updates apply by themselves (nothing to run on the PC):
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import socket
@@ -69,7 +70,7 @@ JOBS_DIR = os.path.join(common.BRIDGE_DIR, "jobs")
 JOB_LOGS = common.home_path(CFG, "logs", "jobs")
 JOB_RETRY = 75                 # a job's exit code for "not now, try again later"
 CODE = {                       # which files belong to which part (relative to this folder)
-    "supervisor": ["supervisor.py", "common.py"],
+    "supervisor": ["supervisor.py", "common.py", "config.json"],
     "gateway": ["gateway/*.py", "weaver-server/*.py", "fusion-shim/*.py"],
     "watcher": ["watcher/*.py", "common.py"],
 }
@@ -558,8 +559,14 @@ def syntax_error(files):
     """None, or the first syntax error in these files (checked before any restart)."""
     for f in files:
         try:
-            with open(f, encoding="utf-8") as fh:
-                compile(fh.read(), f, "exec")
+            with open(f, encoding="utf-8-sig") as fh:
+                text = fh.read()
+            if f.endswith(".json"):
+                json.loads(text)
+            else:
+                compile(text, f, "exec")
+        except ValueError as exc:
+            return "%s: %s" % (os.path.relpath(f, common.BRIDGE_DIR), exc)
         except SyntaxError as exc:
             return "%s, строка %s: %s" % (os.path.relpath(f, common.BRIDGE_DIR), exc.lineno, exc.msg)
         except (OSError, UnicodeDecodeError) as exc:

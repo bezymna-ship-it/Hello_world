@@ -19,7 +19,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -124,15 +123,6 @@ def obsidian_running():
     return "obsidian.exe" in out.lower()
 
 
-def venv(name):
-    try:
-        home = json.load(open(os.path.join(HERE, "config.json"), encoding="utf-8-sig")).get("home")
-    except Exception:
-        home = None
-    exe = os.path.join(home or r"C:\weaver_bridge", "venv", "Scripts", name)
-    return exe if os.path.isfile(exe) else sys.executable
-
-
 def main():
     say("# Уборка хранилища %s — %s\n" % (DAY, "ВЫПОЛНЕНО" if GO else "сухой прогон (ничего не меняется)"))
 
@@ -151,7 +141,7 @@ def main():
             try:
                 os.rename(s, d)
             except OSError as exc:
-                say("  ! не перенесено: %s (открыто в программе или окне cmd? закрой и запусти ещё раз)" % exc)
+                say("  ! не перенесено: %s (открыто в программе или окне cmd?)" % exc)
 
     say("\n## 2. Новые файлы: главная, пульт, CLAUDE.md, AGENTS.md, скрытие, start_claude.bat")
     for new, target in PUT:
